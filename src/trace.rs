@@ -11,6 +11,7 @@ use windows_core::PWSTR;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::schema::Schemas;
 
 /// What an event's timestamp counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,11 +36,11 @@ impl Trace {
     where
         F: FnMut(&Event<'_>) + Send + 'static,
     {
-        let mut on_event = Box::new(on_event);
+        let mut pump = Box::new(Pump::new(on_event));
         let mut name: Vec<u16> = session.encode_utf16().chain(Some(0)).collect();
         let mut logfile = EVENT_TRACE_LOGFILEW {
             LoggerName: PWSTR(name.as_mut_ptr()),
-            Context: (&mut *on_event as *mut F).cast(),
+            Context: (&mut *pump as *mut Pump<F>).cast(),
             Anonymous: EVENT_TRACE_LOGFILEW_0 {
                 ProcessTraceMode: mode(timestamps) | PROCESS_TRACE_MODE_REAL_TIME as u32,
             },
@@ -54,7 +55,7 @@ impl Trace {
             .name("etw-pump".into())
             .spawn(move || {
                 let _ = unsafe { ProcessTrace(&[PROCESSTRACE_HANDLE(handle.0)], None, None) };
-                drop(on_event);
+                drop(pump);
             })
             .map_err(|error| {
                 unsafe { CloseTrace(handle) };
@@ -102,11 +103,11 @@ pub fn read_file<F>(file: &Path, timestamps: Timestamps, on_event: F) -> Result<
 where
     F: FnMut(&Event<'_>),
 {
-    let mut on_event = on_event;
+    let mut pump = Pump::new(on_event);
     let mut path: Vec<u16> = file.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut logfile = EVENT_TRACE_LOGFILEW {
         LogFileName: PWSTR(path.as_mut_ptr()),
-        Context: (&mut on_event as *mut F).cast(),
+        Context: (&mut pump as *mut Pump<F>).cast(),
         Anonymous: EVENT_TRACE_LOGFILEW_0 {
             ProcessTraceMode: mode(timestamps),
         },
@@ -166,12 +167,29 @@ impl Drop for Trace {
     }
 }
 
+/// What one trace's callbacks share: the caller's callback and the schemas
+/// of the kinds of events seen so far. ProcessTrace calls back on one
+/// thread, so nothing in it is locked.
+struct Pump<F> {
+    on_event: F,
+    schemas: Schemas,
+}
+
+impl<F> Pump<F> {
+    fn new(on_event: F) -> Self {
+        Self {
+            on_event,
+            schemas: Schemas::default(),
+        }
+    }
+}
+
 unsafe extern "system" fn dispatch<F: FnMut(&Event<'_>)>(record: *mut EVENT_RECORD) {
     let Some(record) = (unsafe { record.as_ref() }) else {
         return;
     };
-    let Some(on_event) = (unsafe { record.UserContext.cast::<F>().as_mut() }) else {
+    let Some(pump) = (unsafe { record.UserContext.cast::<Pump<F>>().as_mut() }) else {
         return;
     };
-    on_event(&Event::new(record));
+    (pump.on_event)(&Event::new(record, &pump.schemas));
 }

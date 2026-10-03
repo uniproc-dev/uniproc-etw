@@ -69,6 +69,56 @@ fn a_running_session_is_listed_and_stopped_by_name() {
     assert_eq!(session.query(), None);
 }
 
+const KERNEL_PROCESS: u128 = 0x22FB2CD6_0E7B_422B_A0C7_2FAD1FD0E716;
+const PROCESS_KEYWORD: u64 = 0x10;
+
+#[test]
+#[ignore = "requires admin"]
+fn a_manifest_event_tells_its_task_and_opcode_by_name() {
+    let name = "Uniproc-Etw-Test-Names";
+    stop(name);
+    let session = Session::start(name, &Options::real_time());
+    assert!(session.is_ok(), "{:?}", session.err());
+    let session = session.unwrap();
+    let enable = Enable {
+        keywords: PROCESS_KEYWORD,
+        level: 4,
+    };
+    let enabled = session.enable(KERNEL_PROCESS, enable);
+    assert!(enabled.is_ok(), "{enabled:?}");
+
+    let (sender, received) = mpsc::channel();
+    let trace = Trace::real_time(name, Timestamps::SystemTime, move |event| {
+        if event.provider() == KERNEL_PROCESS && event.id() == 1 {
+            let _ = sender.send((
+                event.number("ProcessID"),
+                event.task_name().map(str::to_owned),
+                event.opcode_name().map(str::to_owned),
+            ));
+        }
+    });
+    assert!(trace.is_ok(), "{:?}", trace.err());
+
+    let child = std::process::Command::new("cmd.exe").args(["/c", "exit"]).spawn();
+    assert!(child.is_ok(), "{:?}", child.err());
+    let mut child = child.unwrap();
+    let pid = u64::from(child.id());
+    let _ = child.wait();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut told = None;
+    while let Ok(start) = received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        if start.0 == Some(pid) {
+            told = Some(start);
+            break;
+        }
+    }
+    drop(trace);
+    drop(session);
+    let told = told.map(|(_, task, opcode)| (task, opcode));
+    assert_eq!(told, Some((Some("ProcessStart".to_string()), Some("Start".to_string()))));
+}
+
 #[test]
 #[ignore = "requires admin"]
 fn a_real_time_trace_hands_over_events_until_its_session_stops() {

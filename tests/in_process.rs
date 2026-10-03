@@ -142,8 +142,40 @@ fn write_fields() {
     );
 }
 
+#[test]
+fn events_of_one_provider_alike_but_for_their_names_are_told_apart() {
+    let mut told = Vec::new();
+    record(
+        "Names",
+        || {
+            tlg::write_event!(PROVIDER, "First", opcode(Start), u32("A", &1));
+            tlg::write_event!(PROVIDER, "Second", opcode(Start), u32("A", &2));
+            tlg::write_event!(PROVIDER, "First", opcode(Start), u32("A", &3));
+        },
+        |event| {
+            told.push((
+                event.event_name().map(str::to_owned),
+                event.task_name().map(str::to_owned),
+                event.number("A"),
+            ))
+        },
+    );
+
+    let first = Some("First".to_string());
+    let second = Some("Second".to_string());
+    assert_eq!(
+        told,
+        [
+            (first.clone(), first.clone(), Some(1)),
+            (second.clone(), second, Some(2)),
+            (first.clone(), first, Some(3)),
+        ]
+    );
+}
+
 #[derive(Debug)]
 struct Fields {
+    name: Option<String>,
     big: Option<u64>,
     small: Option<u64>,
     text: Option<String>,
@@ -154,6 +186,7 @@ struct Fields {
 
 fn fields(event: &Event<'_>) -> Fields {
     Fields {
+        name: event.event_name().map(str::to_owned),
         big: event.number("Big"),
         small: event.number("Small"),
         text: event.text("Text"),
@@ -166,6 +199,7 @@ fn fields(event: &Event<'_>) -> Fields {
 fn assert_fields(told: &[Fields]) {
     assert_eq!(told.len(), 1, "{told:?}");
     let told = &told[0];
+    assert_eq!(told.name.as_deref(), Some("Fields"));
     assert_eq!(told.big, Some(0x1122_3344_5566_7788));
     assert_eq!(told.small, Some(513));
     assert_eq!(told.text.as_deref(), Some("Привет"));

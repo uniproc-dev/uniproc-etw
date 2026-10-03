@@ -1,23 +1,43 @@
+use std::cell::OnceCell;
+use std::sync::Arc;
+
 use windows_core::PWSTR;
 
-use crate::aligned::AlignedBuf;
 use crate::bindings::{
-    CP_ACP, ERROR_INSUFFICIENT_BUFFER, EVENT_HEADER_EXTENDED_DATA_ITEM, EVENT_HEADER_FLAG_64_BIT_HEADER, EVENT_RECORD,
-    MultiByteToWideChar, PROPERTY_DATA_DESCRIPTOR, TDH_INTYPE_COUNTEDANSISTRING, TDH_INTYPE_COUNTEDSTRING,
-    TDH_INTYPE_REVERSEDCOUNTEDANSISTRING, TDH_INTYPE_REVERSEDCOUNTEDSTRING, TRACE_EVENT_INFO, TdhGetEventInformation,
-    TdhGetProperty, TdhGetPropertySize,
+    CP_ACP, EVENT_HEADER_EXTENDED_DATA_ITEM, EVENT_HEADER_FLAG_64_BIT_HEADER, EVENT_RECORD, MultiByteToWideChar,
+    PROPERTY_DATA_DESCRIPTOR, TDH_INTYPE_COUNTEDANSISTRING, TDH_INTYPE_COUNTEDSTRING,
+    TDH_INTYPE_REVERSEDCOUNTEDANSISTRING, TDH_INTYPE_REVERSEDCOUNTEDSTRING, TdhGetProperty, TdhGetPropertySize,
 };
+use crate::schema::{Schema, Schemas};
 
 const SID_REVISION: u8 = 1;
 
 /// An event as ETW hands it to a callback.
 pub struct Event<'a> {
     record: &'a EVENT_RECORD,
+    schemas: Option<&'a Schemas>,
+    schema: OnceCell<Option<Arc<Schema>>>,
 }
 
 impl<'a> Event<'a> {
-    pub(crate) fn new(record: &'a EVENT_RECORD) -> Self {
-        Self { record }
+    pub(crate) fn new(record: &'a EVENT_RECORD, schemas: &'a Schemas) -> Self {
+        Self {
+            record,
+            schemas: Some(schemas),
+            schema: OnceCell::new(),
+        }
+    }
+
+    /// What TDH tells of this kind of event, asked once per kind in a trace.
+    fn schema(&self) -> Option<&Schema> {
+        self.shared_schema().as_deref()
+    }
+
+    fn shared_schema(&self) -> &Option<Arc<Schema>> {
+        self.schema.get_or_init(|| match self.schemas {
+            Some(schemas) => schemas.get(self.record),
+            None => Schema::of(self.record).map(Arc::new),
+        })
     }
 
     pub fn provider(&self) -> u128 {
@@ -134,30 +154,23 @@ impl<'a> Event<'a> {
         Some(from_code_page(string_bytes(&bytes, self.in_type(name), 1)))
     }
 
-    /// The TDH in-type of the top-level field of this name.
+    /// The name of the event's task, as its manifest gives it, without
+    /// surrounding blanks; a TraceLogging event's task is named after the
+    /// event.
+    pub fn task_name(&self) -> Option<&str> {
+        self.schema()?.task()
+    }
+
+    pub fn opcode_name(&self) -> Option<&str> {
+        self.schema()?.opcode()
+    }
+
+    pub fn event_name(&self) -> Option<&str> {
+        self.schema()?.event()
+    }
+
     fn in_type(&self, name: &str) -> Option<u16> {
-        let mut size = 0u32;
-        let asked = unsafe { TdhGetEventInformation(self.record, None, None, &mut size) };
-        if asked.0 != ERROR_INSUFFICIENT_BUFFER as u32 {
-            return None;
-        }
-        let mut buf = AlignedBuf::zeroed(size as usize);
-        let info = buf.as_mut_ptr().cast::<TRACE_EVENT_INFO>();
-        if unsafe { TdhGetEventInformation(self.record, None, Some(info), &mut size) }.0 != 0 {
-            return None;
-        }
-        let base = buf.as_ptr();
-        let properties = unsafe {
-            std::slice::from_raw_parts(
-                (*info).EventPropertyInfoArray.as_ptr(),
-                (*info).TopLevelPropertyCount as usize,
-            )
-        };
-        properties
-            .iter()
-            .find(|property| unsafe { windows_core::PCWSTR(base.add(property.NameOffset as usize).cast()).to_string() }
-                .is_ok_and(|named| named == name))
-            .map(|property| unsafe { property.Anonymous.nonStructType.InType })
+        self.schema()?.in_type(name)
     }
 
     /// A SID field.
@@ -171,9 +184,10 @@ impl<'a> Event<'a> {
         token_user_sid(&self.bytes(name)?, self.is_64_bit())
     }
 
-    /// A copy that outlives the callback.
+    /// A copy that outlives the callback, with this kind's schema, so its
+    /// names and fields cost no more on the other thread.
     pub fn to_owned(&self) -> OwnedEvent {
-        OwnedEvent::copy(self.record)
+        OwnedEvent::copy(self.record, self.shared_schema().clone())
     }
 }
 
@@ -226,6 +240,7 @@ fn token_user_sid(bytes: &[u8], is_64_bit: bool) -> Option<Vec<u8>> {
 /// to be read on another thread.
 pub struct OwnedEvent {
     record: EVENT_RECORD,
+    schema: Option<Arc<Schema>>,
     _data: Vec<u8>,
     _items: Vec<EVENT_HEADER_EXTENDED_DATA_ITEM>,
     _extended: Vec<Vec<u8>>,
@@ -235,9 +250,12 @@ unsafe impl Send for OwnedEvent {}
 unsafe impl Sync for OwnedEvent {}
 
 impl OwnedEvent {
-    fn copy(record: &EVENT_RECORD) -> Self {
-        let source = Event::new(record);
-        let data = source.user_data().to_vec();
+    fn copy(record: &EVENT_RECORD, schema: Option<Arc<Schema>>) -> Self {
+        let data = if record.UserData.is_null() {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(record.UserData as *const u8, record.UserDataLength as usize) }.to_vec()
+        };
         let mut items: Vec<EVENT_HEADER_EXTENDED_DATA_ITEM> = if record.ExtendedData.is_null() {
             Vec::new()
         } else {
@@ -256,6 +274,7 @@ impl OwnedEvent {
         record.UserContext = std::ptr::null_mut();
         Self {
             record,
+            schema,
             _data: data,
             _items: items,
             _extended: extended,
@@ -263,7 +282,11 @@ impl OwnedEvent {
     }
 
     pub fn event(&self) -> Event<'_> {
-        Event::new(&self.record)
+        Event {
+            record: &self.record,
+            schemas: None,
+            schema: OnceCell::from(self.schema.clone()),
+        }
     }
 }
 

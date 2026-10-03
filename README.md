@@ -5,7 +5,9 @@ Event Tracing for Windows, shared by [uniproc-windows-agent](https://github.com/
 - `Session`: starts and stops trace sessions, enables providers, reads ETW's counters, changes the flush timer of a running session. A system logger turns on SeSystemProfilePrivilege itself.
 - `Trace::real_time`: hands a session's events to a callback on a thread of its own.
 - `read_file`: reads the events a session wrote to a file, with the `Clock` its raw timestamps count in.
-- `Event`: header fields and raw payload without copies, fields by name through TDH (numbers, UTF-16 and code-page strings, counted or terminated, SIDs), and `to_owned` for reading on another thread.
+- `Event`: header fields and raw payload without copies, task, opcode and event names, fields by name through TDH (numbers, UTF-16 and code-page strings, counted or terminated, SIDs), and `to_owned` for reading on another thread.
+
+TDH's description of an event is asked once per kind of event in a trace, not once per event. A manifest event's kind is its descriptor. Every TraceLogging event has id 0, so its kind is the schema it carries.
 
 Nothing of windows-rs crosses the API: a provider is a `u128`.
 

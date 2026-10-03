@@ -11,6 +11,7 @@ mod bindings;
 mod error;
 mod event;
 mod privilege;
+mod schema;
 mod session;
 mod trace;
 

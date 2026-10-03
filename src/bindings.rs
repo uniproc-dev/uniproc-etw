@@ -367,6 +367,7 @@ impl EVENT_HEADER_EXTENDED_DATA_ITEM_0 {
         self._bitfield = (self._bitfield & !(32767 << 1)) | ((value & 32767) << 1);
     }
 }
+pub const EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL: i32 = 11;
 pub const EVENT_HEADER_FLAG_64_BIT_HEADER: i32 = 64;
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -726,6 +727,7 @@ pub struct PROPERTY_DATA_DESCRIPTOR {
     pub Reserved: u32,
 }
 pub type PROPERTY_FLAGS = i32;
+pub const PropertyStruct: PROPERTY_FLAGS = 1;
 pub const SE_PRIVILEGE_ENABLED: i32 = 2;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
