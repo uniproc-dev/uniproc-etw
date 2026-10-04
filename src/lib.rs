@@ -16,6 +16,6 @@ mod session;
 mod trace;
 
 pub use error::{Error, Result};
-pub use event::{Event, OwnedEvent};
+pub use event::{Event, Header, OwnedEvent};
 pub use session::{Counters, Enable, LogFile, Options, Session, running, stop};
 pub use trace::{Clock, ClockKind, Timestamps, Trace, read_file};

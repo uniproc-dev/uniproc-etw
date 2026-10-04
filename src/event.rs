@@ -236,6 +236,22 @@ fn token_user_sid(bytes: &[u8], is_64_bit: bool) -> Option<Vec<u8>> {
         .map(<[u8]>::to_vec)
 }
 
+/// The header of an event made up by [`OwnedEvent::new`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Header {
+    pub provider: u128,
+    pub id: u16,
+    pub version: u8,
+    pub opcode: u8,
+    pub task: u16,
+    pub level: u8,
+    pub keywords: u64,
+    pub process_id: u32,
+    pub thread_id: u32,
+    pub timestamp: i64,
+    pub flags: u16,
+}
+
 /// An event copied out of the callback, payload and extended data with it,
 /// to be read on another thread.
 pub struct OwnedEvent {
@@ -250,6 +266,28 @@ unsafe impl Send for OwnedEvent {}
 unsafe impl Sync for OwnedEvent {}
 
 impl OwnedEvent {
+    /// An event no session wrote, for the tests of what reads events by
+    /// their header and payload. It has no schema: its fields are not found
+    /// by name.
+    pub fn new(header: Header, user_data: Vec<u8>) -> Self {
+        let mut record = EVENT_RECORD::default();
+        let made = &mut record.EventHeader;
+        made.ProviderId = windows_core::GUID::from_u128(header.provider);
+        made.EventDescriptor.Id = header.id;
+        made.EventDescriptor.Version = header.version;
+        made.EventDescriptor.Opcode = header.opcode;
+        made.EventDescriptor.Task = header.task;
+        made.EventDescriptor.Level = header.level;
+        made.EventDescriptor.Keyword = header.keywords;
+        made.ProcessId = header.process_id;
+        made.ThreadId = header.thread_id;
+        made.TimeStamp = header.timestamp;
+        made.Flags = header.flags;
+        record.UserData = user_data.as_ptr() as *mut _;
+        record.UserDataLength = user_data.len().min(u16::MAX as usize) as u16;
+        Self::copy(&record, None)
+    }
+
     fn copy(record: &EVENT_RECORD, schema: Option<Arc<Schema>>) -> Self {
         let data = if record.UserData.is_null() {
             Vec::new()
@@ -300,6 +338,43 @@ mod tests {
         let mut bytes = vec![0xAA; 2 * pointer];
         bytes.extend_from_slice(&SID);
         bytes
+    }
+
+    #[test]
+    fn a_made_up_event_tells_the_header_and_bytes_it_was_made_with() {
+        let header = Header {
+            provider: 0x9A280AC0_C8E0_11D1_84E2_00C04FB998A2,
+            id: 3,
+            version: 2,
+            opcode: 12,
+            task: 4,
+            level: 5,
+            keywords: 0x30,
+            process_id: 41,
+            thread_id: 42,
+            timestamp: 1_000_000,
+            flags: EVENT_HEADER_FLAG_64_BIT_HEADER as u16,
+        };
+        let made = OwnedEvent::new(header, vec![1, 2, 3]);
+        let event = made.event();
+        let told = Header {
+            provider: event.provider(),
+            id: event.id(),
+            version: event.version(),
+            opcode: event.opcode(),
+            task: event.task(),
+            level: event.level(),
+            keywords: event.keywords(),
+            process_id: event.process_id(),
+            thread_id: event.thread_id(),
+            timestamp: event.timestamp(),
+            flags: event.flags(),
+        };
+        assert_eq!(told, header);
+        assert!(event.is_64_bit());
+        assert_eq!(event.user_data(), &[1, 2, 3]);
+        assert_eq!(event.number("Anything"), None);
+        assert_eq!(event.task_name(), None);
     }
 
     #[test]
